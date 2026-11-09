@@ -292,14 +292,14 @@ bool readCalibration(rclcpp::Node::SharedPtr node)
 
 bool readGlobalparam(rclcpp::Node::SharedPtr node)
 {
-    node->declare_parameter<std::string>("imu_topic","imu/data");
-    node->declare_parameter<std::string>("laser_topic","velodyne_points");
+    node->declare_parameter<std::string>("imu_topic","/livox/imu");
+    node->declare_parameter<std::string>("laser_topic","/livox/lidar");
     node->declare_parameter<std::string>("odom_topic","integrated_to_init");
     node->declare_parameter<std::string>("depthup_topic","/rs_up/depth/cloud_filtered");
     node->declare_parameter<std::string>("depthdown_topic","/rs_down/depth/cloud_filtered");
-    node->declare_parameter<std::string>("world_frame", "sensor_init");
+    node->declare_parameter<std::string>("world_frame", "map");
     node->declare_parameter<std::string>("world_frame_rot", "sensor_init_rot");
-    node->declare_parameter<std::string>("sensor_frame", "sensor");
+    node->declare_parameter<std::string>("sensor_frame", "livox_frame");
     node->declare_parameter<std::string>("sensor_frame_rot", "sensor_rot");
     node->declare_parameter<std::string>("PROJECT_NAME", "arise_slam");
     

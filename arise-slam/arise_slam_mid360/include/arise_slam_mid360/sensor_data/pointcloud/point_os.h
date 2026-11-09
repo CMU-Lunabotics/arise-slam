@@ -45,6 +45,16 @@ struct OusterPointXYZIRT {
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     } EIGEN_ALIGN16;
 
+// livox_ros_driver2 PointCloud2 layout (xfer_format 0), timestamp is absolute ns
+struct LivoxPointXYZITLT {
+        PCL_ADD_POINT4D;
+        float intensity;
+        uint8_t tag;
+        uint8_t line;
+        double timestamp;
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    } EIGEN_ALIGN16;
+
 } // namespace point_os
 
 // clang-format off
@@ -70,6 +80,11 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(point_os::OusterPointXYZIRT,
                                   (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
                                           (uint32_t, t, t) (uint16_t, reflectivity, reflectivity)
                                           (uint8_t, ring, ring) (uint16_t, noise, noise) (uint32_t, range, range)
+)
+
+POINT_CLOUD_REGISTER_POINT_STRUCT(point_os::LivoxPointXYZITLT,
+                                  (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
+                                          (uint8_t, tag, tag) (uint8_t, line, line) (double, timestamp, timestamp)
 )
 
 

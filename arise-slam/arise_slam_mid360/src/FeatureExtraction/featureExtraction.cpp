@@ -61,20 +61,20 @@ namespace arise_slam {
             rclcpp::shutdown();
         }
 
-        // subLaserCloud = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-        //     LASER_TOPIC, 2, 
-        //     std::bind(&featureExtraction::laserCloudHandler, this,
-        //                 std::placeholders::_1), sub_options);
+        subLaserCloud = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+            LASER_TOPIC, 2, 
+            std::bind(&featureExtraction::laserCloudHandler, this,
+                        std::placeholders::_1), sub_options);
 
-        if (config_.sensor == SensorType::VELODYNE || config_.sensor == SensorType::OUSTER) {
-            subLaserCloud = this->create_subscription<sensor_msgs::msg::PointCloud2>(LASER_TOPIC, 2, 
-                    std::bind(&featureExtraction::laserCloudHandler, this,
-                    std::placeholders::_1), sub_options);
-        } else if (config_.sensor == SensorType::LIVOX) {
-            subLivoxCloud = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(LASER_TOPIC, 20, 
-                    std::bind(&featureExtraction::livoxHandler, this,
-                    std::placeholders::_1), sub_options);
-        } //TODO: add this to config
+        // if (config_.sensor == SensorType::VELODYNE || config_.sensor == SensorType::OUSTER) {
+        //     subLaserCloud = this->create_subscription<sensor_msgs::msg::PointCloud2>(LASER_TOPIC, 2, 
+        //             std::bind(&featureExtraction::laserCloudHandler, this,
+        //             std::placeholders::_1), sub_options);
+        // } else if (config_.sensor == SensorType::LIVOX) {
+        //     subLivoxCloud = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(LASER_TOPIC, 20, 
+        //             std::bind(&featureExtraction::livoxHandler, this,
+        //             std::placeholders::_1), sub_options);
+        // } //TODO: add this to config
 
         subImu = this->create_subscription<sensor_msgs::msg::Imu>(
             IMU_TOPIC, 10, 
@@ -1370,8 +1370,12 @@ namespace arise_slam {
 
                         std::cout<<"IMU Initialization Process Finish! "<<std::endl;
 
+                        // scans buffered before init were not gravity aligned, drop them
+                        double lidar_last_time;
+                        lidarBuf.getLastTime(lidar_last_time);
+                        lidarBuf.clean(lidar_last_time);
                     }
-                    if(IMU_INIT==true)
+                    else if(IMU_INIT==true)
                     {   
                         // RCLCPP_INFO(get_logger(), "In distortion loop");
                        undistortionAndscanregistration();
@@ -1515,6 +1519,42 @@ namespace arise_slam {
                     dst.time = src.t * 1e-9f;
                 }
             }
+            else if (config_.sensor == SensorType::LIVOX)
+            {
+                // livox_ros_driver2 PointCloud2, same filtering as livoxHandler
+                pcl::PointCloud<point_os::LivoxPointXYZITLT> livoxCloudIn;
+                pcl::fromROSMsg(*laserCloudMsg, livoxCloudIn);
+                const double header_ns = laserCloudMsg->header.stamp.sec * 1e9 + laserCloudMsg->header.stamp.nanosec;
+                const Eigen::Matrix3d &Roll_Pitch_Gravity_Matrix = imu_Init->imu_laser_R_Gravity;
+
+                pointCloud->points.reserve(livoxCloudIn.size());
+                for (const auto &src : livoxCloudIn.points)
+                {
+                    if (src.line >= config_.N_SCANS ||
+                        ((src.tag & 0x30) != 0x10 && (src.tag & 0x30) != 0x00))
+                        continue;
+
+                    // flip before the gravity rotation, matching the order in imu_Handler
+                    Eigen::Vector3d point(src.x, src.y, src.z);
+                    if (config_.lidar_flip)
+                    {
+                        point.y() *= -1.0;
+                        point.z() *= -1.0;
+                    }
+                    Eigen::Vector3d transformed_point = Roll_Pitch_Gravity_Matrix * point;
+
+                    point_os::PointcloudXYZITR dst;
+                    dst.x = transformed_point.x();
+                    dst.y = transformed_point.y();
+                    dst.z = transformed_point.z();
+                    dst.intensity = src.intensity;
+                    dst.ring = src.line;
+                    dst.time = float((src.timestamp - header_ns) * 1e-9);
+                    pointCloud->points.push_back(dst);
+                }
+                pointCloud->width = pointCloud->points.size();
+                pointCloud->height = 1;
+            }
             else
             {
                 RCLCPP_ERROR(this->get_logger(),"Unknown sensor type: %d", int(sensor));
@@ -1530,9 +1570,10 @@ namespace arise_slam {
 
         }
 
-        if (config_.lidar_flip) 
+        // livox points are already flipped above
+        if (config_.lidar_flip && !(config_.provide_point_time && config_.sensor == SensorType::LIVOX))
         {
-            for (uint i = 1; i < pointCloud->points.size(); i++)
+            for (uint i = 0; i < pointCloud->points.size(); i++)
             {
                 pointCloud->points[i].y *= -1.0;
                 pointCloud->points[i].z *= -1.0;
@@ -1600,7 +1641,7 @@ namespace arise_slam {
 
         if (config_.lidar_flip) 
         {
-            for (uint i = 1; i < msg->point_num; i++)
+            for (uint i = 0; i < msg->point_num; i++)
             {
                 msg->points[i].y *= -1.0;
                 msg->points[i].z *= -1.0;

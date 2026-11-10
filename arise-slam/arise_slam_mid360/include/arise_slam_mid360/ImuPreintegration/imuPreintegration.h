@@ -5,14 +5,17 @@
 #ifndef IMUPREINTEGRATION_H
 #define IMUPREINTEGRATION_H
 
-#include "rclcpp/rclcpp.hpp"
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_ros/static_transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.h>
+#include <builtin_interfaces/msg/time.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <tf2/LinearMath/Quaternion.h>
+#include <std_msgs/msg/string.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#include <tf2_ros/transform_broadcaster.h>
-
+#include "rclcpp/rclcpp.hpp"
 
 #include "utility.h"
 #include <gtsam/geometry/Pose3.h>
@@ -153,25 +156,46 @@ namespace arise_slam {
 
 
     private:
-        // ROS Interface
-        // Subscribers
-        rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr subImu;
-        rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subLaserOdometry;
-        rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subVisualOdometry;
-        
-        // Publishers
-        rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry;
-        rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry2;
-        rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pubHealthStatus;
-        rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubImuPath;
+      // A stationary capture initializes one prior in fiducial coordinates.
+      // Native ARISE odometry remains in WORLD_FRAME; the fixed transform links them.
+      void fiducialInitializationHandler(const nav_msgs::msg::Odometry::SharedPtr msg);
+      bool initializeFromFiducial(double correctionTime, const gtsam::Pose3 & nativeLidarPose);
+      void fiducialStatus(const std::string & status);
+      bool fiducial_required_ = false;
+      bool fiducial_applied_ = false;
+      bool fiducial_failed_ = false;
+      double fiducial_time_tolerance_ = 0.15;
+      std::string fiducial_frame_ = "fiducial_origin";
+      std::string fiducial_sensor_frame_ = "lidar_link";
+      nav_msgs::msg::Odometry::SharedPtr fiducial_capture_;
+      gtsam::Pose3 fiducial_T_world_;
+      gtsam::Pose3 previousLaserImuPose_;
+      rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subFiducialInitialization;
+      rclcpp::Publisher<builtin_interfaces::msg::Time>::SharedPtr pubFiducialApplied;
+      rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr pubVirtualSensorTransform;
+      rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pubFiducialStatus;
+      std::unique_ptr<tf2_ros::StaticTransformBroadcaster> fiducialTf;
 
-        rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometrySmooth;
+      // ROS Interface
+      // Subscribers
+      rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr subImu;
+      rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subLaserOdometry;
+      rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subVisualOdometry;
 
-        rclcpp::CallbackGroup::SharedPtr cb_group_;
+      // Publishers
+      rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry;
+      rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry2;
+      rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pubHealthStatus;
+      rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubImuPath;
+
+      rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometrySmooth;
+
+      rclcpp::CallbackGroup::SharedPtr cb_group_;
+
     public:
         gtsam::noiseModel::Diagonal::shared_ptr noMotionNoise;
         gtsam::noiseModel::Diagonal::shared_ptr noVelocityNoise;
-        gtsam::noiseModel::Diagonal::shared_ptr priorPoseNoise;
+        gtsam::noiseModel::Gaussian::shared_ptr priorPoseNoise;
         gtsam::noiseModel::Diagonal::shared_ptr priorVisualPoseNoise;
         gtsam::noiseModel::Diagonal::shared_ptr priorVelNoise;
         gtsam::noiseModel::Diagonal::shared_ptr priorBiasNoise;

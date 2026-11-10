@@ -2,6 +2,7 @@
 // Created by shibo zhao on 2020-09-27.
 //
 #include "arise_slam_mid360/ImuPreintegration/imuPreintegration.h"
+#include "arise_slam_mid360/ImuPreintegration/FiducialInitialization.h"
 
 // For TransformFusion
 static double lidarOdomTime2=-1;
@@ -37,7 +38,38 @@ namespace arise_slam {
 
         RCLCPP_INFO(this->get_logger(), "[AriseSlam::imuPreintegration] use_imu_roll_pitch:  %d", config_.use_imu_roll_pitch);
         RCLCPP_INFO(this->get_logger(), "[AriseSlam::imuPreintegration] lidar_flip:  %d", config_.lidar_flip);
-        
+
+        fiducial_required_ =
+          this->declare_parameter<bool>("fiducial_initialization_required", false);
+        fiducial_frame_ = this->declare_parameter<std::string>("fiducial_frame", "fiducial_origin");
+        fiducial_sensor_frame_ =
+          this->declare_parameter<std::string>("fiducial_sensor_frame", "lidar_link");
+        fiducial_time_tolerance_ =
+          this->declare_parameter<double>("fiducial_time_tolerance_s", 0.15);
+        if (fiducial_required_) {
+          if (
+            !std::isfinite(fiducial_time_tolerance_) || fiducial_time_tolerance_ <= 0.0 ||
+            config_.sensor != SensorType::LIVOX || config_.lidar_flip ||
+            config_.use_imu_roll_pitch || !PROVIDE_IMU_LASER_EXTRINSIC || fiducial_frame_.empty() ||
+            fiducial_sensor_frame_.empty() || fiducial_frame_ == WORLD_FRAME) {
+            throw std::invalid_argument("Unsupported fiducial startup frames/configuration");
+          }
+          auto latched = rclcpp::QoS(1).transient_local();
+          pubVirtualSensorTransform = this->create_publisher<geometry_msgs::msg::TransformStamped>(
+            "/fiducial/virtual_sensor_transform", latched);
+          pubFiducialApplied = this->create_publisher<builtin_interfaces::msg::Time>(
+            "/fiducial/initialization_applied", latched);
+          pubFiducialStatus = this->create_publisher<std_msgs::msg::String>(
+            "/fiducial/initialization_status", latched);
+          fiducialTf = std::make_unique<tf2_ros::StaticTransformBroadcaster>(this);
+          subFiducialInitialization = this->create_subscription<nav_msgs::msg::Odometry>(
+            "/fiducial/initial_pose", 1,
+            std::bind(
+              &imuPreintegration::fiducialInitializationHandler, this, std::placeholders::_1),
+            sub_options);
+          fiducialStatus("waiting for stationary fiducial capture; IMU graph startup is gated");
+        }
+
         //subscribe and publish relevant topics
         subImu = this->create_subscription<sensor_msgs::msg::Imu>(
             IMU_TOPIC, 10,
@@ -224,6 +256,10 @@ namespace arise_slam {
     }
 
     void imuPreintegration::resetParams() {
+      if (fiducial_applied_) {
+        fiducial_failed_ = true;
+        fiducialStatus("failed: restart ARISE and fiducial nodes; startup constraint was lost");
+      }
         lastImuT_imu = -1;
         doneFirstOpt = false;
         systemInitialized = false;
@@ -273,6 +309,10 @@ namespace arise_slam {
         catch (...)
         {
             RCLCPP_WARN(this->get_logger(), "Failed to reset graph. No marginal covariance key");
+            if (fiducial_applied_) {
+              resetParams();
+              return;
+            }
             updatedPoseNoise = priorPoseNoise;
             updatedVelNoise = priorVelNoise;
             updatedBiasNoise = priorBiasNoise;
@@ -331,6 +371,7 @@ namespace arise_slam {
         graphFactors.add(priorPose);
         // initial velocity
         prevVel_ = gtsam::Vector3(0, 0, 0);
+        prevState_ = gtsam::NavState(prevPose_, prevVel_);
         gtsam::PriorFactor<gtsam::Vector3> priorVel(V(0), prevVel_,
                                                     priorVelNoise);
         graphFactors.add(priorVel);
@@ -411,9 +452,15 @@ namespace arise_slam {
         //     correctionNoise =  gtsam::noiseModel::Isotropic::Sigma(6, lidar_correction_noise); // meter
 
         // }
-        gtsam::PriorFactor<gtsam::Pose3> pose_factor(X(key), curPose,
-                                                     correctionNoise);
-        graphFactors.add(pose_factor);
+        if (fiducial_applied_) {
+          // The capture anchors key 0 only. Subsequent scan matching supplies
+          // relative motion, avoiding a fresh absolute copy of the startup anchor.
+          graphFactors.add(
+            gtsam::BetweenFactor<gtsam::Pose3>(
+              X(key - 1), X(key), previousLaserImuPose_.between(curPose), correctionNoise));
+        } else {
+          graphFactors.add(gtsam::PriorFactor<gtsam::Pose3>(X(key), curPose, correctionNoise));
+        }
                 // add imu factor to graph
         
         const gtsam::PreintegratedImuMeasurements &preint_imu =
@@ -453,6 +500,7 @@ namespace arise_slam {
             // RCLCPP_INFO_STREAM(this->get_logger(), "X shape" <<  X);
             // Overwrite the beginning of the preintegration for the next step.
             gtsam::Values result = optimizer.calculateEstimate();
+            previousLaserImuPose_ = curPose;
             prevPose_ = result.at<gtsam::Pose3>(X(key));
             prevVel_ = result.at<gtsam::Vector3>(V(key));
             prevState_ = gtsam::NavState(prevPose_, prevVel_);
@@ -506,6 +554,7 @@ namespace arise_slam {
         // reset graph for speed
         if (key > 100) {
             reset_graph();
+            if (!systemInitialized) return;
         }
 
         // 1. integrate_imumeasurement
@@ -649,6 +698,115 @@ namespace arise_slam {
 
 #endif
 
+    void imuPreintegration::fiducialStatus(const std::string & status)
+    {
+      if (!pubFiducialStatus) return;
+      std_msgs::msg::String msg;
+      msg.data = status;
+      pubFiducialStatus->publish(msg);
+      RCLCPP_INFO(this->get_logger(), "Fiducial initialization: %s", status.c_str());
+    }
+
+    void imuPreintegration::fiducialInitializationHandler(
+      const nav_msgs::msg::Odometry::SharedPtr msg)
+    {
+      std::lock_guard<std::mutex> lock(mBuf);
+      if (fiducial_applied_ || fiducial_failed_ || fiducial_capture_) {
+        fiducialStatus("rejected duplicate initialization; restart both nodes to capture again");
+        return;
+      }
+      const auto & p = msg->pose.pose.position;
+      const auto & q = msg->pose.pose.orientation;
+      Eigen::Quaterniond rotation(q.w, q.x, q.y, q.z);
+      gtsam::Matrix66 covariance;
+      for (int row = 0; row < 6; ++row)
+        for (int col = 0; col < 6; ++col)
+          covariance(row, col) = msg->pose.covariance[row * 6 + col];
+      if (
+        msg->header.frame_id != fiducial_frame_ || msg->child_frame_id != fiducial_sensor_frame_ ||
+        !Eigen::Vector3d(p.x, p.y, p.z).allFinite() || !rotation.coeffs().allFinite() ||
+        std::abs(rotation.norm() - 1.0) > 1e-3 || !covariance.allFinite() ||
+        !covariance.isApprox(covariance.transpose(), 1e-8) ||
+        Eigen::LLT<gtsam::Matrix66>(covariance).info() != Eigen::Success) {
+        fiducialStatus("rejected invalid pose, frame, or covariance");
+        return;
+      }
+      fiducial_capture_ = msg;
+      fiducialStatus("capture queued for a time-matched laser odometry key");
+    }
+
+    bool imuPreintegration::initializeFromFiducial(
+      double correctionTime, const gtsam::Pose3 & nativeLidarPose)
+    {
+      if (!fiducial_capture_ || fiducial_failed_ || !imu_init_success) return false;
+      const auto capture = fiducial_capture_;
+      const double dt = correctionTime - secs(capture);
+      if (dt < -fiducial_time_tolerance_) return false;
+      if (dt > fiducial_time_tolerance_) {
+        fiducial_capture_.reset();
+        fiducialStatus("rejected stale capture; reset the capture node and try again");
+        return false;
+      }
+      const auto & p = capture->pose.pose.position;
+      const auto & q = capture->pose.pose.orientation;
+      Eigen::Quaterniond rawRotation(q.w, q.x, q.y, q.z);
+      rawRotation.normalize();
+      const gtsam::Pose3 rawPose(gtsam::Rot3(rawRotation), gtsam::Point3(p.x, p.y, p.z));
+      gtsam::Matrix66 covariance;
+      for (int row = 0; row < 6; ++row)
+        for (int col = 0; col < 6; ++col)
+          covariance(row, col) = capture->pose.covariance[row * 6 + col];
+      // Use the actual gravity alignment applied by ARISE, not a guessed mount flip.
+      const auto initialization = makeFiducialInitialization(
+        rawPose, covariance, gtsam::Rot3(imu_Init->imu_laser_R_Gravity.transpose()), lidar2Imu,
+        nativeLidarPose);
+      priorPoseNoise = gtsam::noiseModel::Gaussian::Covariance(initialization.imuCovariance);
+      fiducial_T_world_ = initialization.fiducial_T_world;
+      try {
+        initial_system(correctionTime, initialization.virtualLidarPose);
+      } catch (const std::exception & error) {
+        fiducial_failed_ = true;
+        fiducial_capture_.reset();
+        fiducialStatus(
+          std::string("failed: startup optimization; restart required: ") + error.what());
+        return false;
+      }
+      previousLaserImuPose_ = initialization.virtualLidarPose.compose(lidar2Imu);
+      fiducial_applied_ = true;
+      last_processed_lidar_time = correctionTime;
+      fiducial_capture_.reset();
+
+      geometry_msgs::msg::TransformStamped transform;
+      transform.header.stamp = capture->header.stamp;
+      // Keep the existing map -> odom parent; the fiducial is a fixed child of odom.
+      transform.header.frame_id = WORLD_FRAME;
+      transform.child_frame_id = fiducial_frame_;
+      const auto nativeWorld_T_fiducial = fiducial_T_world_.inverse();
+      const auto origin = nativeWorld_T_fiducial.translation();
+      const auto orientation = nativeWorld_T_fiducial.rotation().toQuaternion();
+      transform.transform.translation.x = origin.x();
+      transform.transform.translation.y = origin.y();
+      transform.transform.translation.z = origin.z();
+      transform.transform.rotation.x = orientation.x();
+      transform.transform.rotation.y = orientation.y();
+      transform.transform.rotation.z = orientation.z();
+      transform.transform.rotation.w = orientation.w();
+      fiducialTf->sendTransform(transform);
+      geometry_msgs::msg::TransformStamped virtualSensor;
+      virtualSensor.header.stamp = capture->header.stamp;
+      virtualSensor.header.frame_id = SENSOR_FRAME;
+      virtualSensor.child_frame_id = fiducial_sensor_frame_;
+      const Eigen::Quaterniond rawToVirtual(imu_Init->imu_laser_R_Gravity);
+      virtualSensor.transform.rotation.x = rawToVirtual.x();
+      virtualSensor.transform.rotation.y = rawToVirtual.y();
+      virtualSensor.transform.rotation.z = rawToVirtual.z();
+      virtualSensor.transform.rotation.w = rawToVirtual.w();
+      pubVirtualSensorTransform->publish(virtualSensor);
+      pubFiducialApplied->publish(capture->header.stamp);
+      fiducialStatus("applied startup prior once at key 0; native odometry frame preserved");
+      return true;
+    }
+
     void imuPreintegration::laserodometryHandler(const nav_msgs::msg::Odometry::SharedPtr odomMsg) {
         // RCLCPP_INFO(this->get_logger(), "laserOdometryCB from /aft_mapped_to_init_incremental");
         std::lock_guard<std::mutex> lock(mBuf);
@@ -656,7 +814,14 @@ namespace arise_slam {
 
         cur_frame = odomMsg;
         double lidarOdomTime = secs(odomMsg);
-
+        if (
+          fiducial_applied_ && last_processed_lidar_time >= 0.0 &&
+          lidarOdomTime <= last_processed_lidar_time) {
+          if (lidarOdomTime < last_processed_lidar_time - fiducial_time_tolerance_) {
+            resetParams();
+          }
+          return;
+        }
 
         if (imuQueOpt.empty())
             return;
@@ -673,6 +838,12 @@ namespace arise_slam {
         gtsam::Pose3 lidarPose = gtsam::Pose3(gtsam::Rot3::Quaternion(r_w, r_x, r_y, r_z),
                                               gtsam::Point3(p_x, p_y, p_z));
 
+        if (fiducial_required_ && !fiducial_applied_) {
+          initializeFromFiducial(lidarOdomTime, lidarPose);
+          return;
+        }
+        if (fiducial_failed_) return;
+        lidarPose = fiducial_T_world_.compose(lidarPose);
 
         // 0. initialize system
         if (systemInitialized == false) {
@@ -999,7 +1170,7 @@ namespace arise_slam {
             // transform imu pose to ldiar
         gtsam::Pose3 imuPose =
                 gtsam::Pose3(imuRot, currentState.position());
-        gtsam::Pose3 lidarPoseOpt = imuPose.compose(imu2Lidar);
+        gtsam::Pose3 lidarPoseOpt = fiducial_T_world_.inverse().compose(imuPose.compose(imu2Lidar));
 
         Eigen::Vector3d velocity_w_curr(currentState.velocity().x(), currentState.velocity().y(),
                                         currentState.velocity().z());

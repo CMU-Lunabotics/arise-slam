@@ -44,7 +44,7 @@ namespace arise_slam {
           this->declare_parameter<bool>("fiducial_initialization_required", false);
         fiducial_frame_ = this->declare_parameter<std::string>("fiducial_frame", "fiducial_origin");
         fiducial_sensor_frame_ =
-          this->declare_parameter<std::string>("fiducial_sensor_frame", "lidar_link");
+          this->declare_parameter<std::string>("fiducial_sensor_frame", "livox_frame");
         fiducial_time_tolerance_ =
           this->declare_parameter<double>("fiducial_time_tolerance_s", 0.15);
         if (fiducial_required_) {
@@ -724,85 +724,85 @@ namespace arise_slam {
         for (int col = 0; col < 6; ++col)
           covariance(row, col) = msg->pose.covariance[row * 6 + col];
       const Eigen::Vector3d position(p.x, p.y, p.z);
-        const double rotation_norm = rotation.norm();
-        const double rotation_norm_error = std::abs(rotation_norm - 1.0);
+      const double rotation_norm = rotation.norm();
+      const double rotation_norm_error = std::abs(rotation_norm - 1.0);
 
-        const bool frame_ok = msg->header.frame_id == fiducial_frame_;
-        const bool child_frame_ok =
-            msg->child_frame_id == fiducial_sensor_frame_;
-        const bool position_ok = position.allFinite();
-        const bool rotation_finite = rotation.coeffs().allFinite();
-        const bool rotation_norm_ok = rotation_norm_error <= 1e-3;
-        const bool covariance_finite = covariance.allFinite();
+      const bool frame_ok = msg->header.frame_id == fiducial_frame_;
+      const bool child_frame_ok =
+          msg->child_frame_id == fiducial_sensor_frame_;
+      const bool position_ok = position.allFinite();
+      const bool rotation_finite = rotation.coeffs().allFinite();
+      const bool rotation_norm_ok = rotation_norm_error <= 1e-3;
+      const bool covariance_finite = covariance.allFinite();
 
-        const bool covariance_symmetric =
-            covariance_finite &&
-            covariance.isApprox(covariance.transpose(), 1e-8);
+      const bool covariance_symmetric =
+          covariance_finite &&
+          covariance.isApprox(covariance.transpose(), 1e-8);
 
-        // Avoid running LLT on a matrix containing NaN or infinity.
-        bool covariance_llt_ok = false;
-        if (covariance_finite) {
+      // Avoid running LLT on a matrix containing NaN or infinity.
+      bool covariance_llt_ok = false;
+      if (covariance_finite) {
         const Eigen::LLT<gtsam::Matrix66> llt(covariance);
         covariance_llt_ok = llt.info() == Eigen::Success;
-        }
+      }
 
-        if (!frame_ok || !child_frame_ok || !position_ok ||
-            !rotation_finite || !rotation_norm_ok || !covariance_finite ||
-            !covariance_symmetric || !covariance_llt_ok) {
-        std::ostringstream debug;
-        debug.precision(17);
-        debug << std::boolalpha;
-        debug << "Rejected invalid fiducial measurement:\n";
+      if (!frame_ok || !child_frame_ok || !position_ok ||
+          !rotation_finite || !rotation_norm_ok || !covariance_finite ||
+          !covariance_symmetric || !covariance_llt_ok) {
+      std::ostringstream debug;
+      debug.precision(17);
+      debug << std::boolalpha;
+      debug << "Rejected invalid fiducial measurement:\n";
 
-        if (!frame_ok) {
-            debug << "  FAIL header.frame_id: actual='"
-                << msg->header.frame_id << "', expected='"
-                << fiducial_frame_ << "'\n";
-        }
+      if (!frame_ok) {
+          debug << "  FAIL header.frame_id: actual='"
+              << msg->header.frame_id << "', expected='"
+              << fiducial_frame_ << "'\n";
+      }
 
-        if (!child_frame_ok) {
-            debug << "  FAIL child_frame_id: actual='"
-                << msg->child_frame_id << "', expected='"
-                << fiducial_sensor_frame_ << "'\n";
-        }
+      if (!child_frame_ok) {
+          debug << "  FAIL child_frame_id: actual='"
+              << msg->child_frame_id << "', expected='"
+              << fiducial_sensor_frame_ << "'\n";
+      }
 
-        if (!position_ok) {
-            debug << "  FAIL position.allFinite(): position=["
-                << position.transpose() << "]\n";
-        }
+      if (!position_ok) {
+          debug << "  FAIL position.allFinite(): position=["
+              << position.transpose() << "]\n";
+      }
 
-        if (!rotation_finite || !rotation_norm_ok) {
-            debug << "  Quaternion [x y z w]=["
-                << rotation.coeffs().transpose() << "]\n"
-                << "    allFinite=" << rotation_finite << "\n"
-                << "    norm=" << rotation_norm << "\n"
-                << "    abs(norm - 1)=" << rotation_norm_error
-                << ", tolerance=0.001"
-                << ", passed=" << rotation_norm_ok << "\n";
-        }
+      if (!rotation_finite || !rotation_norm_ok) {
+          debug << "  Quaternion [x y z w]=["
+              << rotation.coeffs().transpose() << "]\n"
+              << "    allFinite=" << rotation_finite << "\n"
+              << "    norm=" << rotation_norm << "\n"
+              << "    abs(norm - 1)=" << rotation_norm_error
+              << ", tolerance=0.001"
+              << ", passed=" << rotation_norm_ok << "\n";
+      }
 
-        if (!covariance_finite || !covariance_symmetric ||
-            !covariance_llt_ok) {
-            debug << "  Covariance:\n" << covariance << "\n"
-                << "    allFinite=" << covariance_finite << "\n"
-                << "    symmetry isApprox(tolerance=1e-8)="
-                << covariance_symmetric << "\n";
+      if (!covariance_finite || !covariance_symmetric ||
+          !covariance_llt_ok) {
+          debug << "  Covariance:\n" << covariance << "\n"
+              << "    allFinite=" << covariance_finite << "\n"
+              << "    symmetry isApprox(tolerance=1e-8)="
+              << covariance_symmetric << "\n";
 
-            if (covariance_finite) {
-            debug << "    max absolute asymmetry="
-                    << (covariance - covariance.transpose())
-                        .cwiseAbs()
-                        .maxCoeff()
-                    << "\n"
-                    << "    LLT succeeded=" << covariance_llt_ok << "\n";
-            } else {
-            debug << "    LLT skipped because covariance is non-finite\n";
-            }
-        }
+          if (covariance_finite) {
+          debug << "    max absolute asymmetry="
+                  << (covariance - covariance.transpose())
+                      .cwiseAbs()
+                      .maxCoeff()
+                  << "\n"
+                  << "    LLT succeeded=" << covariance_llt_ok << "\n";
+          } else {
+          debug << "    LLT skipped because covariance is non-finite\n";
+          }
+      }
 
         fiducialStatus(debug.str());
         return;
-        }
+      }
       fiducial_capture_ = msg;
       fiducialStatus("capture queued for a time-matched laser odometry key");
     }

@@ -46,7 +46,7 @@ namespace arise_slam {
         fiducial_sensor_frame_ =
           this->declare_parameter<std::string>("fiducial_sensor_frame", "lidar_link");
         fiducial_time_tolerance_ =
-          this->declare_parameter<double>("fiducial_time_tolerance_s", 0.15);
+          this->declare_parameter<double>("fiducial_time_tolerance_s", 2.0);
         if (fiducial_required_) {
           if (
             !std::isfinite(fiducial_time_tolerance_) || fiducial_time_tolerance_ <= 0.0 ||

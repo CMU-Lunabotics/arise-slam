@@ -44,7 +44,7 @@ namespace arise_slam {
           this->declare_parameter<bool>("fiducial_initialization_required", false);
         fiducial_frame_ = this->declare_parameter<std::string>("fiducial_frame", "fiducial_origin");
         fiducial_sensor_frame_ =
-          this->declare_parameter<std::string>("fiducial_sensor_frame", "livox_frame");
+          this->declare_parameter<std::string>("fiducial_sensor_frame", "lidar_link");
         fiducial_time_tolerance_ =
           this->declare_parameter<double>("fiducial_time_tolerance_s", 0.15);
         if (fiducial_required_) {

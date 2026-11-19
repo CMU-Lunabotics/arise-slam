@@ -164,7 +164,7 @@ namespace arise_slam {
       bool fiducial_required_ = false;
       bool fiducial_applied_ = false;
       bool fiducial_failed_ = false;
-      double fiducial_time_tolerance_ = 0.15;
+      double fiducial_time_tolerance_ = 10.0;
       std::string fiducial_frame_ = "fiducial_origin";
       std::string fiducial_sensor_frame_ = "lidar_link";
       nav_msgs::msg::Odometry::SharedPtr fiducial_capture_;

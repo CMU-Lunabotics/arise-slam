@@ -817,6 +817,10 @@ namespace arise_slam {
       if (dt > fiducial_time_tolerance_) {
         fiducial_capture_.reset();
         fiducialStatus("rejected stale capture; reset the capture node and try again");
+        fiducialStatus(
+          std::string("capture time mismatch: dt=") + std::to_string(dt) +
+          " seconds; tolerance=" + std::to_string(fiducial_time_tolerance_) +
+          " seconds");
         return false;
       }
       const auto & p = capture->pose.pose.position;
